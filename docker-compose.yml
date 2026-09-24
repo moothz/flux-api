@@ -1,0 +1,23 @@
+services:
+  flux-api:
+    build: .
+    container_name: flux-api-gpu
+    restart: unless-stopped
+    ports:
+      - "${PORT:-13005}:13005"
+    env_file:
+      - .env
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    volumes:
+      - ./hf_cache:/root/.cache/huggingface/hub/
+      - ./app:/workspace/app
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

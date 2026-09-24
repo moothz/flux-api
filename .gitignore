@@ -1,0 +1,24 @@
+# Environment & Config
+.env
+.venv/
+env/
+venv/
+
+# Model & Cache directories
+hf_cache/
+outputs/
+.cache/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test outputs
+tests/*.png
+tests/*.jpg
+test_*.png
+test_*.jpg
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
