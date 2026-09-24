@@ -61,7 +61,8 @@ class FluxManager:
                 token=token,
             )
             if settings.DEVICE == "cuda":
-                self.pipe_t2i.to("cuda")
+                log.info("Enabling model CPU offload for FLUX...")
+                self.pipe_t2i.enable_model_cpu_offload()
         elif settings.QUANTIZATION.lower() == "fp8":
             log.info("Loading FLUX in FP8 format...")
             self.pipe_t2i = FluxPipeline.from_pretrained(
@@ -70,7 +71,7 @@ class FluxManager:
                 token=token,
             )
             if settings.DEVICE == "cuda":
-                self.pipe_t2i.to("cuda")
+                self.pipe_t2i.enable_model_cpu_offload()
         else:
             log.info("Loading FLUX in standard %s format...", settings.TORCH_DTYPE)
             self.pipe_t2i = FluxPipeline.from_pretrained(
@@ -79,7 +80,7 @@ class FluxManager:
                 token=token,
             )
             if settings.DEVICE == "cuda":
-                self.pipe_t2i.to("cuda")
+                self.pipe_t2i.enable_model_cpu_offload()
 
         # Share weights with Img2Img and Inpaint pipelines without duplicating VRAM
         log.info("Instantiating shared Img2Img and Inpaint pipelines...")
@@ -144,6 +145,8 @@ class FluxManager:
             guidance_scale=g,
             generator=generator,
         ).images[0]
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         log.info("Generated image in %.2fs (steps=%d, size=%dx%d)", time.time() - start_t, s, w, h)
         return result
 
@@ -180,6 +183,8 @@ class FluxManager:
             guidance_scale=g,
             generator=generator,
         ).images[0]
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         log.info("Edited image in %.2fs (strength=%.2f, steps=%d)", time.time() - start_t, st, s)
         return result
 
@@ -218,6 +223,8 @@ class FluxManager:
             guidance_scale=g,
             generator=generator,
         ).images[0]
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         log.info("Inpainted image in %.2fs (steps=%d)", time.time() - start_t, s)
         return result
 
