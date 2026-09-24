@@ -29,8 +29,8 @@ class FluxManager:
         )
         start_t = time.time()
 
-        from diffusers import FluxPipeline, FluxImg2ImgPipeline, FluxInpaintPipeline, FluxTransformer2DModel
-        from transformers import BitsAndBytesConfig
+        from diffusers import AutoencoderKL, FluxImg2ImgPipeline, FluxInpaintPipeline, FluxPipeline, FluxTransformer2DModel
+        from transformers import BitsAndBytesConfig, T5EncoderModel
 
         hf_tok = settings.HF_TOKEN.strip() if settings.HF_TOKEN and settings.HF_TOKEN.strip() else None
         if not hf_tok and os.environ.get("HF_TOKEN") and os.environ.get("HF_TOKEN").strip():
@@ -40,29 +40,49 @@ class FluxManager:
         dtype = torch.bfloat16 if settings.TORCH_DTYPE == "bfloat16" else torch.float16
 
         if settings.QUANTIZATION.lower() == "nf4":
-            log.info("Applying 4-bit (NF4) BitsAndBytes quantization to FLUX transformer...")
-            quant_config_transformer = BitsAndBytesConfig(
+            log.info("Applying 4-bit (NF4) BitsAndBytes quantization to both FLUX transformer & T5 on %s...", settings.DEVICE)
+            quant_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_compute_dtype=dtype,
             )
+            device_map = {"": settings.DEVICE} if settings.DEVICE.startswith("cuda") else None
+
+            vae = AutoencoderKL.from_pretrained(
+                settings.MODEL_ID,
+                subfolder="vae",
+                torch_dtype=dtype,
+                token=token,
+            )
+            vae.config.force_upcast = False
+            text_encoder_2 = T5EncoderModel.from_pretrained(
+                settings.MODEL_ID,
+                subfolder="text_encoder_2",
+                quantization_config=quant_config,
+                torch_dtype=dtype,
+                device_map=device_map,
+                token=token,
+            )
             transformer = FluxTransformer2DModel.from_pretrained(
                 settings.MODEL_ID,
                 subfolder="transformer",
-                quantization_config=quant_config_transformer,
+                quantization_config=quant_config,
                 torch_dtype=dtype,
+                device_map=device_map,
                 token=token,
             )
 
             self.pipe_t2i = FluxPipeline.from_pretrained(
                 settings.MODEL_ID,
+                vae=vae,
+                text_encoder_2=text_encoder_2,
                 transformer=transformer,
                 torch_dtype=dtype,
                 token=token,
             )
             if settings.DEVICE == "cuda":
-                log.info("Enabling model CPU offload for FLUX...")
-                self.pipe_t2i.enable_model_cpu_offload()
+                self.pipe_t2i.text_encoder.to("cuda")
+                self.pipe_t2i.vae.to("cuda")
         elif settings.QUANTIZATION.lower() == "fp8":
             log.info("Loading FLUX in FP8 format...")
             self.pipe_t2i = FluxPipeline.from_pretrained(
@@ -71,7 +91,7 @@ class FluxManager:
                 token=token,
             )
             if settings.DEVICE == "cuda":
-                self.pipe_t2i.enable_model_cpu_offload()
+                self.pipe_t2i.to("cuda")
         else:
             log.info("Loading FLUX in standard %s format...", settings.TORCH_DTYPE)
             self.pipe_t2i = FluxPipeline.from_pretrained(
@@ -80,17 +100,43 @@ class FluxManager:
                 token=token,
             )
             if settings.DEVICE == "cuda":
-                self.pipe_t2i.enable_model_cpu_offload()
+                self.pipe_t2i.to("cuda")
 
         # Share weights with Img2Img and Inpaint pipelines without duplicating VRAM
         log.info("Instantiating shared Img2Img and Inpaint pipelines...")
         self.pipe_i2i = FluxImg2ImgPipeline.from_pipe(self.pipe_t2i)
         self.pipe_inpaint = FluxInpaintPipeline.from_pipe(self.pipe_t2i)
 
+        # Patch _encode_vae_image to align input tensor dtype with VAE parameter dtype
+        import types
+        from diffusers.pipelines.flux.pipeline_flux_img2img import retrieve_latents
+
+        def _patched_encode_vae_image(pipe_self, image: torch.Tensor, generator: torch.Generator):
+            vae_dtype = next(pipe_self.vae.parameters()).dtype
+            img = image.to(dtype=vae_dtype)
+            if isinstance(generator, list):
+                image_latents = [
+                    retrieve_latents(pipe_self.vae.encode(img[i : i + 1]), generator=generator[i])
+                    for i in range(img.shape[0])
+                ]
+                image_latents = torch.cat(image_latents, dim=0)
+            else:
+                image_latents = retrieve_latents(pipe_self.vae.encode(img), generator=generator)
+
+            image_latents = (image_latents - pipe_self.vae.config.shift_factor) * pipe_self.vae.config.scaling_factor
+            return image_latents.to(dtype=dtype)
+
+        self.pipe_i2i._encode_vae_image = types.MethodType(_patched_encode_vae_image, self.pipe_i2i)
+        self.pipe_inpaint._encode_vae_image = types.MethodType(_patched_encode_vae_image, self.pipe_inpaint)
+
         # Optimize VAE decoding memory
         try:
             self.pipe_t2i.enable_vae_slicing()
             self.pipe_t2i.enable_vae_tiling()
+            self.pipe_i2i.enable_vae_slicing()
+            self.pipe_i2i.enable_vae_tiling()
+            self.pipe_inpaint.enable_vae_slicing()
+            self.pipe_inpaint.enable_vae_tiling()
         except Exception:
             pass
 
